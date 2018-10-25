@@ -107,7 +107,11 @@
     </None>
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="TDTSandwich.h" />
     <ClInclude Include="__vm\.TDTSandwich.vsarduino.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="TDTSandwich.cpp" />
   </ItemGroup>
   <PropertyGroup>
     <DebuggerFlavor>VisualMicroDebugger</DebuggerFlavor>
