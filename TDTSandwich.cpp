@@ -59,7 +59,8 @@ TDTSandwich::TDTSandwich( SerialCommunication& communicator,
 
   // Initialize heaters
   for (uint8_t h = 0; h < heaterCount_; h++)
-  {
+  {// Although the new keyword is not recommended in Arduino, it is OK here since we are only creating these class instances
+    // at the beginning, and not on the fly (which could lead to memory issues if not disposed of properly).
     heaterTCAmplifier_[h] = new MAX31856(heaterCSPin[h], heaterDRDYPin[h], heaterFaultPin[h]);
     heaterSSRPin_[h] = heaterSSRPin[h];
     pinMode(heaterSSRPin[h], OUTPUT);
@@ -75,10 +76,10 @@ TDTSandwich::TDTSandwich( SerialCommunication& communicator,
   sampleTCAmplifier_ = new MAX31856(sampleCSPin, sampleDRDYPin, sampleFaultPin);
 
   // Set all flags to idle state
-  bool DAQHeaterActive_;
-  bool DAQSampleActive_;
-  bool heatActive_;
-  bool flasherBlinking_;
+  DAQHeaterActive_ = false;
+  DAQSampleActive_ = false;
+  heatActive_ = false;
+  flasherBlinking_ = false;
 }
 
 TDTSandwich::~TDTSandwich()
@@ -156,7 +157,8 @@ void TDTSandwich::startDAQ(MAX31856_TCType TCType, MAX31856_SampleAveraging aver
 
     // Initialize status flags
     heaterTCOK_[h] = true;
-    freshTemperatureReading_[h] = false;
+    heaterTReadySend_[h] = false;
+    heaterTFreshReading[h] = false;
   }
 
   DAQHeaterActive_ = true;
@@ -167,6 +169,7 @@ void TDTSandwich::startDAQ(MAX31856_TCType TCType, MAX31856_SampleAveraging aver
     sampleTCAmplifier_->setThermocoupleTypeAndOversampling(TCType, averageSampleCount);
     sampleTCAmplifier_->startAutoConversion();
     sampleTCOK_ = true;
+    sampleTReadySend_ = false;
     DAQSampleActive_ = true;
   }
 }
@@ -304,74 +307,120 @@ void TDTSandwich::blinkFlasher()
   }
 }
 
+// Stop all sandwich operations
+void TDTSandwich::shutdown()
+{
+  if (DAQHeaterActive_ || DAQSampleActive_)
+  {
+    if (heatActive_)
+    {
+      stopHeat(true);
+    }
+
+    stopDAQ();
+  }
+}
+
 // Fetch and store temperature readings from all thermocouple amplifiers,
 // provided that they are available and have no faults.
 void TDTSandwich::getTemperatureReading_()
 {
   for (uint8_t h = 0; h < heaterCount_; h++)
   {
-    if (heaterTCAmplifier_[h]->isFaultless())
-    {// The heater thermocouple amplifier did not detect any errors
-      heaterTCOK_[h] = true;
+    if (!heaterTReadySend_[h])
+    {// Need to get the heater temperature reading; otherwise just chill.
+      if (heaterTCAmplifier_[h]->isFaultless())
+      {// The heater thermocouple amplifier did not detect any errors
+        heaterTCOK_[h] = true;
 
-      if (heaterTCAmplifier_[h]->dataIsReady())
-      {// There is new temperature data available
-        heaterTemperature_[h] = heaterTCAmplifier_[h]->readTCTemperature();
-        freshTemperatureReading_[h] = true;
+        if (heaterTCAmplifier_[h]->dataIsReady())
+        {// There is new temperature data available
+          heaterTemperature_[h] = heaterTCAmplifier_[h]->readTCTemperature();
+          heaterTReadySend_[h] = true;
+          heaterTFreshReading[h] = true;
 
-        // Trigger open-circuit detection for the next conversion
-        heaterTCAmplifier_[h]->checkOpenCircuit(MODE_1);
-
-        // Send temperature reading to computer
-        communicator_.sendHeaterTemperature(h, heaterTemperature_[h]);
+          // Trigger open-circuit detection for the next conversion
+          heaterTCAmplifier_[h]->checkOpenCircuit(MODE_1);
+        }
+        // Failing the check for DRDY means no new temperature data, therefore no need to do anything else but wait
       }
-      // Failing the check for DRDY means no new temperature data, therefore no need to do anything else but wait
-    }
-    else
-    {// The heater thermocouple amplifier detected an error
-      // Note: FAULT pin does not assert for "out-of-range" (p15 of datasheet) situations
-      // i.e. the converted value falls outside of the thermocouple rated range.
-      // It is thus recommended to manually set the high and low thresholds for the hot
-      // and cold junctions (since we prolly won't go up to the limits of the rated range).
-      // The high/low thresholds do trigger the FAULT pin.
-      if (heaterTCOK_[h])
-      {// Only take action if this is the first time fault was encountered.
-        // Otherwise, do nothing, at least until the fault is cleared, in which case would trigger
-        // the previous code block
-        heaterTCOK_[h] = false;
-        handleTCAmplifierFault(heaterTCAmplifier_[h], true, h);
+      else
+      {// The heater thermocouple amplifier detected an error
+        // Note: FAULT pin does not assert for "out-of-range" (p15 of datasheet) situations
+        // i.e. the converted value falls outside of the thermocouple rated range.
+        // It is thus recommended to manually set the high and low thresholds for the hot
+        // and cold junctions (since we prolly won't go up to the limits of the rated range).
+        // The high/low thresholds do trigger the FAULT pin.
+        if (heaterTCOK_[h])
+        {// Only take action if this is the first time fault was encountered.
+          // Otherwise, do nothing, at least until the fault is cleared, in which case would trigger
+          // the previous code block
+          heaterTCOK_[h] = false;
+          heaterTReadySend_[h] = false;
+          handleTCAmplifierFault(heaterTCAmplifier_[h], true, h);
+        }
       }
     }
   }
-
-  // Only check for sample thermocouple data if we are measuring sample temperature
+  
   if (DAQSampleActive_)
-  {
-    if (sampleTCAmplifier_->isFaultless())
-    {// The sample thermocouple amplifier did not detect any errors
-      sampleTCOK_ = true;
+  {// Only check for sample thermocouple readings if we are measuring sample temperature
+    if (!sampleTReadySend_)
+    {// Need to get a sample temperature reading; otherwise just chill.
+      if (sampleTCAmplifier_->isFaultless())
+      {// The sample thermocouple amplifier did not detect any errors
+        sampleTCOK_ = true;
 
-      if (sampleTCAmplifier_->dataIsReady())
-      {// There is new temperature data available
-        sampleTemperature_ = sampleTCAmplifier_->readTCTemperature();
+        if (sampleTCAmplifier_->dataIsReady())
+        {// There is new temperature data available
+          sampleTemperature_ = sampleTCAmplifier_->readTCTemperature();
+          sampleTReadySend_ = true;
 
-        // Trigger open-circuit detection for the next conversion
-        sampleTCAmplifier_->checkOpenCircuit(MODE_1);
-
-        // Send temperature reading to computer
-        communicator_.sendSampleTemperature(sampleTemperature_);
+          // Trigger open-circuit detection for the next conversion
+          sampleTCAmplifier_->checkOpenCircuit(MODE_1);
+        }
+        // Failing the check for DRDY means no new temperature data, therefore no need to do anything else but wait
       }
-      // Failing the check for DRDY means no new temperature data, therefore no need to do anything else but wait
+      else
+      {// The sample thermocouple amplifier detected an error
+        if (sampleTCOK_)
+        {// Only take action if this is the first time fault was encountered.
+          // Otherwise, do nothing, at least until the fault is cleared, in which case would trigger
+          // the previous code block
+          sampleTCOK_ = false;
+          sampleTReadySend_ = false;
+          handleTCAmplifierFault(sampleTCAmplifier_, false, 0);
+        }
+      }
     }
-    else
-    {// The sample thermocouple amplifier detected an error
-      if (sampleTCOK_)
-      {// Only take action if this is the first time fault was encountered.
-        // Otherwise, do nothing, at least until the fault is cleared, in which case would trigger
-        // the previous code block
-        sampleTCOK_ = false;
-        handleTCAmplifierFault(sampleTCAmplifier_, false, 0);
-      }
+
+    // Only send data to computer if ALL thermocouples obey one of the following rules:
+    // a) TReadySend_ AND TCOK    : new temperature reading available, and the TC amplifier is OK
+    // b) !TReadySend_ AND !TCOK  : there was an error with the TC amplifier
+    // c) TReadySend_ AND !TCOK   : this case will never occur due to the logic of the code
+    if (!((!heaterTReadySend_[0] && heaterTCOK_[0]) || (!heaterTReadySend_[1] && heaterTCOK_[1]) || (!sampleTReadySend_ && sampleTCOK_)))
+    {// Send temperature reading/error notice to computer
+      communicator_.sendHeaterSampleTemperature(heaterTCOK_[0], heaterTemperature_[0], heaterTCOK_[1], heaterTemperature_[1], sampleTCOK_, sampleTemperature_);
+
+      // Prepare for new readings
+      heaterTReadySend_[0] = false;
+      heaterTReadySend_[1] = false;
+      sampleTReadySend_ = false;
+    }
+  }
+  else
+  {// Not reading temperature of sample; send only heater T readings.
+    // Only send data to computer if the HEATER thermocouples obey one of the following rules:
+    // a) TReadySend_ AND TCOK    : new temperature reading available, and the TC amplifier is OK
+    // b) !TReadySend_ AND !TCOK  : there was an error with the TC amplifier
+    // c) TReadySend_ AND !TCOK   : this case will never occur due to the logic of the code
+    if (!((!heaterTReadySend_[0] && heaterTCOK_[0]) || (!heaterTReadySend_[1] && heaterTCOK_[1])))
+    {// Send temperature reading/error notice to computer
+      communicator_.sendHeaterTemperature(heaterTCOK_[0], heaterTemperature_[0], heaterTCOK_[1], heaterTemperature_[1]);
+
+      // Prepare for new readings
+      heaterTReadySend_[0] = false;
+      heaterTReadySend_[1] = false;
     }
   }
 }
@@ -430,60 +479,67 @@ void TDTSandwich::handleHeating_()
 {
   for (uint8_t h = 0; h < heaterCount_; h++)
   {
-    if (freshTemperatureReading_[h])
-    {// Only perform PID updates if we have new temperature readings
-      unsigned long curTime = millis();
-      freshTemperatureReading_[h] = false;
-      heaterPID_[h].Compute(curTime);
-      // TODO delete
-      // Serial.print("Output: ");
-      // Serial.println(heaterControlOutput_[h]);
-      if (heaterControlOutput_[h] > HEATER_ON_MIN)
-      {// Outside of minimum output treshold; The treshold exists so that if the on time is extremely small,
-        // the heater can just be left off 100% instead of turning on for short time between each PID cycle.
+    if (heaterTCOK_[h])
+    {// Perform heating only if the temperature readings are OK
+      if (heaterTFreshReading[h])
+      {// Only perform PID updates if we have new temperature readings
+        unsigned long curTime = millis();
+        heaterTFreshReading[h] = false;
+        heaterPID_[h].Compute(curTime);
+        // Serial.print("Output: ");
+        // Serial.println(heaterControlOutput_[h]);
+        if (heaterControlOutput_[h] > HEATER_ON_MIN)
+        {// Outside of minimum output treshold; The treshold exists so that if the on time is extremely small,
+          // the heater can just be left off 100% instead of turning on for short time between each PID cycle.
 
-        // Calculate the appropriate time for turning on/off the heater
-        // Remember, we can only reach here if the value of heaterControlOutput_ is already bigger
-        // than HEATER_ON_MIN, that's why we are turning on the heat
-        activateHeater_(h);
+          // Calculate the appropriate time for turning on/off the heater
+          // Remember, we can only reach here if the value of heaterControlOutput_ is already bigger
+          // than HEATER_ON_MIN, that's why we are turning on the heat
+          activateHeater_(h);
 
-        // Calculate timing. Since we are performing heating controls depending on when temperature readings are available,
-        // it is difficult to know ahead of time the exact duration between each temperature reading, and thus the PID period.
-        // If we assume that the period between each reading is roughly the same, then we can estimate the PID period based on
-        // the duration between the previous temperature reading and the current one.
-        unsigned long PIDPeriod = curTime - heaterPrevPIDPeriodStartTime_[h];
-        heatOnTime_[h] = curTime;
-        heatOnDuration_[h] = constrain(heaterControlOutput_[h], HEATER_ON_MIN, PIDLimit_) / PIDLimit_ * PIDPeriod;
-        heaterOn_[h] = true;
+          // Calculate timing. Since we are performing heating controls depending on when temperature readings are available,
+          // it is difficult to know ahead of time the exact duration between each temperature reading, and thus the PID period.
+          // If we assume that the period between each reading is roughly the same, then we can estimate the PID period based on
+          // the duration between the previous temperature reading and the current one.
+          unsigned long PIDPeriod = curTime - heaterPrevPIDPeriodStartTime_[h];
+          heatOnTime_[h] = curTime;
+          heatOnDuration_[h] = constrain(heaterControlOutput_[h], HEATER_ON_MIN, PIDLimit_) / PIDLimit_ * PIDPeriod;
+          heaterOn_[h] = true;
 
-        // Check if the off duration is above the minimum threshold to prevent dead time between subsequent near-100% dutycycles.
-        if (PIDPeriod - heatOnDuration_[h] >= HEATER_OFF_MIN)
-        {
-          heatOffMinSatisfied[h] = true;
+          // Check if the off duration is above the minimum threshold to prevent dead time between subsequent near-100% dutycycles.
+          if (PIDPeriod - heatOnDuration_[h] >= HEATER_OFF_MIN)
+          {
+            heatOffMinSatisfied[h] = true;
+          }
+          else
+          {
+            heatOffMinSatisfied[h] = false;
+          }
+
+
+          // Prepare for next PID cycle
+          heaterPrevPIDPeriodStartTime_[h] = curTime;
         }
         else
-        {
-          heatOffMinSatisfied[h] = false;
+        {// Output is not sufficient to overcome HEATER_ON_MIN, so turn off the heater
+          deactivateHeater_(h);
         }
-
-
-        // Prepare for next PID cycle
-        heaterPrevPIDPeriodStartTime_[h] = curTime;
       }
-      else
-      {// Output is not sufficient to overcome HEATER_ON_MIN, so turn off the heater
+
+      // Turn off heat if it is time
+      if (heaterOn_[h]	// Only need to switch off if the heater is already on
+        &&
+        heatOffMinSatisfied[h]	// Only turn off the heater if the off duration is larger than a certain threshold
+        &&
+        (millis() - heatOnTime_[h]) >= heatOnDuration_[h])	// Timing check
+      {
+        // Time to turn off the heater
         deactivateHeater_(h);
+        heaterOn_[h] = false;
       }
     }
-
-    // Turn off heat if it is time
-    if (heaterOn_[h]	// Only need to switch off if the heater is already on
-      &&
-      heatOffMinSatisfied[h]	// Only turn off the heater if the off duration is larger than a certain threshold
-      &&
-      (millis() - heatOnTime_[h]) >= heatOnDuration_[h])	// Timing check
-    {
-      // Time to turn off the heater
+    else
+    {// Shut down heating if there was a problem with the heater thermocouples.
       deactivateHeater_(h);
       heaterOn_[h] = false;
     }
@@ -520,6 +576,7 @@ void TDTSandwich::handleCountDown_()
   }
 }
 
+// Visually and audibly alert user that the heating is complete, and tells the computer too
 void TDTSandwich::signalHeatEnd_()
 {
   // countdownEndBuffer_ aims to "push" the end time to a number further higher than the actual end time. This allows
@@ -533,6 +590,9 @@ void TDTSandwich::signalHeatEnd_()
     activateBuzzer_();
     stopHeat(false);
     countdownFinishedAlertActive_ = true;
+
+    // Tell computer that heating is complete
+    communicator_.sendHeatingDone();
   }
   else if (countdownFinishedAlertActive_ && heatEndTime_ + countdownEndBuffer_ - millis() <= countdownEndBuffer_ - heatEndAlertDuration_)
   {// Time to turn off the alert system
@@ -545,7 +605,7 @@ void TDTSandwich::signalHeatEnd_()
   }
 }
 
-
+// Blink the alarm LED on request
 void TDTSandwich::handleBlinking_()
 {
   if (blinkEndTime_ - millis() <=  blinkCounter_ * blinkDuration_)

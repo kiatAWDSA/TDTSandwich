@@ -50,14 +50,13 @@ public:
   void init();
   void run();
 
-  // Begin measuring temperature using continuous mode of MAX31856. Sets the thermocouple types.
+  // Commands given to the sandwich
   void startDAQ(MAX31856_TCType TCType, MAX31856_SampleAveraging averageSampleCount, bool measureSample);
   void stopDAQ();
-
   void startHeat(double setpoint, double heatingRate, unsigned long heatDuration, double Kp, double Ki);
   void stopHeat(bool deactivateAlert);
-
   void blinkFlasher();
+  void shutdown();
 
 
 private:
@@ -102,7 +101,8 @@ private:
 
   // Heater thermocouple and heater
   bool heaterTCOK_[heaterCount_];
-  bool freshTemperatureReading_[heaterCount_];
+  bool heaterTReadySend_[heaterCount_];
+  bool heaterTFreshReading[heaterCount_];
   bool heaterOn_[heaterCount_];
   bool heatOffMinSatisfied[heaterCount_];
   double heaterTemperature_[heaterCount_];
@@ -132,6 +132,7 @@ private:
 
   // Sample thermocouple
   bool sampleTCOK_;
+  bool sampleTReadySend_;
   double sampleTemperature_;
 
   // Flasher
@@ -157,7 +158,7 @@ private:
   uint8_t countdownTickCounter_;
   unsigned long countdownTickStartTime_;
 
-
+  // Internal functions
   void getTemperatureReading_();
   void adjustTempSetpoint_();
   void handleHeating_();

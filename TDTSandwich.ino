@@ -119,182 +119,209 @@ void serialEvent() {
       // Check the type of command
       switch (commandType)
       {
-      case SerialCommunication::SERIAL_CMD_CONNECTION:
-      {
-        //TODO Set flag to remain connected
-        /*********************************
-        *   ARDUINO CONNECTION CHECK     *
-        * *******************************/
-        /* Computer checking for connection to Arduino. This doesn't have command IDs.
-        * Format:
-        * ^c@
-        * where    ^    is SERIAL_CMD_START
-        *          w    is SERIAL_CMD_CONNECTION
-        *          @    is SERIAL_CMD_END
-        */
-        communicator.sendSandwichID(sandwichID);
-        break;
-      }
-      case SerialCommunication::SERIAL_CMD_DAQ_START_HEATER:
-      case SerialCommunication::SERIAL_CMD_DAQ_START_SAMPLE:
-      {
-        /*********************************
-        *           START DAQ            *
-        * *******************************/
-        /* Begin data acquisition of temperature of heaters only or of sample thermocouple too.
-        * Format:
-        * ^d/b|T|A@
-        * where    ^    is SERIAL_CMD_START
-        *          d/b  is SERIAL_CMD_DAQ_START_HEATER  or  SERIAL_CMD_DAQ_START_SAMPLE, depending on measuring heaters only or sample thermocouple too
-        *          |    is SERIAL_CMD_SEPARATOR
-        *          T    is type of thermocouple, in capital letters. Choose among B, E, J, K, N, R, S, or T
-        *          A    is amount of samples to be averaged over, choose among 1, 2, 4, 8, or 16.
-        *          @    is SERIAL_CMD_END
-        */
-        uint8_t incomingTCType      = communicator.getFragmentChar(1);
-        int incomingSampleAveraging = communicator.getFragmentInt(2);
-        MAX31856_TCType actualTCType;
-        MAX31856_SampleAveraging actualSampleAveraging;
-
-        switch (incomingTCType)
+        case SerialCommunication::SERIAL_CMD_CONNECTION:
         {
-        case 'B':
-          actualTCType = TCTYPE_B;
+          //TODO Set flag to remain connected
+          /*********************************
+          *   ARDUINO CONNECTION CHECK     *
+          * *******************************/
+          /* Computer checking for connection to Arduino. This doesn't have command IDs.
+          * Format:
+          * ^c@
+          * where    ^    is SERIAL_CMD_START
+          *          w    is SERIAL_CMD_CONNECTION
+          *          @    is SERIAL_CMD_END
+          */
+          communicator.sendSandwichID(sandwichID);
           break;
-        case 'E':
-          actualTCType = TCTYPE_E;
+        }
+        case SerialCommunication::SERIAL_CMD_DAQ_START_HEATER:
+        case SerialCommunication::SERIAL_CMD_DAQ_START_SAMPLE:
+        {
+          /*********************************
+          *           START DAQ            *
+          * *******************************/
+          /* Begin data acquisition of temperature of heaters only or of sample thermocouple too.
+          * Format:
+          * ^d/b|[commandID]|[TCType]|[AveCount]@
+          * where    ^            is SERIAL_CMD_START
+          *          d/b          is SERIAL_CMD_DAQ_START_HEATER  or  SERIAL_CMD_DAQ_START_SAMPLE, depending on measuring heaters only or sample thermocouple too
+          *          |            is SERIAL_CMD_SEPARATOR
+          *          [commandID]  is the ID of this command
+          *          [TCType]     is type of thermocouple, in capital letters. Choose among B, E, J, K, N, R, S, or T
+          *          [AveCount]   is number of readings to be averaged over, choose among 1, 2, 4, 8, or 16.
+          *          @            is SERIAL_CMD_END
+          */
+          uint8_t incomingTCType      = communicator.getFragmentChar(2);
+          int incomingSampleAveraging = communicator.getFragmentInt(3);
+          MAX31856_TCType actualTCType;
+          MAX31856_SampleAveraging actualSampleAveraging;
+
+          switch (incomingTCType)
+          {
+          case 'B':
+            actualTCType = TCTYPE_B;
+            break;
+          case 'E':
+            actualTCType = TCTYPE_E;
+            break;
+          case 'J':
+            actualTCType = TCTYPE_J;
+            break;
+          case 'K':
+            actualTCType = TCTYPE_K;
+            break;
+          case 'N':
+            actualTCType = TCTYPE_N;
+            break;
+          case 'R':
+            actualTCType = TCTYPE_R;
+            break;
+          case 'S':
+            actualTCType = TCTYPE_S;
+            break;
+          case 'T':
+          default:
+            actualTCType = TCTYPE_T;
+            break;
+          // Not allowing direct voltage measurement
+          }
+
+          switch (incomingSampleAveraging)
+          {
+          case 2:
+            actualSampleAveraging = AVERAGE_2;
+            break;
+          case 4:
+            actualSampleAveraging = AVERAGE_4;
+            break;
+          case 8:
+            actualSampleAveraging = AVERAGE_8;
+            break;
+          case 16:
+            actualSampleAveraging = AVERAGE_16;
+            break;
+          case 1:
+          default:
+            actualSampleAveraging = AVERAGE_1;
+            break;
+          }
+
+          // Measure sample T depending on given command
+          if (commandType == SerialCommunication::SERIAL_CMD_DAQ_START_SAMPLE)
+          {
+            sandwich.startDAQ(actualTCType, actualSampleAveraging, true);
+            communicator.sendCommandResponse(communicator.getFragmentInt(1), SerialCommunication::SERIAL_CMD_DAQ_START_SAMPLE, true);
+          }
+          else
+          {
+            sandwich.startDAQ(actualTCType, actualSampleAveraging, false);
+            communicator.sendCommandResponse(communicator.getFragmentInt(1), SerialCommunication::SERIAL_CMD_DAQ_START_HEATER, true);
+          }
           break;
-        case 'J':
-          actualTCType = TCTYPE_J;
+        }
+        case SerialCommunication::SERIAL_CMD_DAQ_STOP:
+        {
+          /*********************************
+          *            STOP DAQ            *
+          * *******************************/
+          /* Stop data acquisition of temperature.
+          * Format:
+          * ^s|[commandID]@
+          * where    ^            is SERIAL_CMD_START
+          *          s            is SERIAL_CMD_DAQ_STOP
+          *          |            is SERIAL_CMD_SEPARATOR
+          *          [commandID]  is the ID of this command
+          *          @            is SERIAL_CMD_END
+          */
+          sandwich.stopDAQ();
+          communicator.sendCommandResponse(communicator.getFragmentInt(1), SerialCommunication::SERIAL_CMD_DAQ_STOP, true);
           break;
-        case 'K':
-          actualTCType = TCTYPE_K;
+        }
+        case SerialCommunication::SERIAL_CMD_HEAT_START:
+        {
+          /*********************************
+          *          START HEAT            *
+          * *******************************/
+          /* Begin the heating process.
+          * Format:
+          * ^h|[commandID]|s|r|d|kp|ki@
+          * where    ^    is SERIAL_CMD_START
+          *          h    is SERIAL_CMD_HEAT_START
+          *          |            is SERIAL_CMD_SEPARATOR
+          *          [commandID]  is the ID of this command
+          *          s    is the temperature setpoint, in °C
+          *          r    is the heating rate, in °C/min
+          *          d    is the heating duration, in seconds (to be converted into ms before going into startHeat() function)
+          *          kp   is the proportional constant for PI algorithm
+          *          ki   is the integral constant for PI algorithm
+          *          @    is SERIAL_CMD_END
+          */
+          sandwich.startHeat( communicator.getFragmentDouble(2),
+                              communicator.getFragmentDouble(3),
+                              communicator.getFragmentULong(4) * 1000,
+                              communicator.getFragmentDouble(5),
+                              communicator.getFragmentDouble(6));
+          communicator.sendCommandResponse(communicator.getFragmentInt(1), SerialCommunication::SERIAL_CMD_HEAT_START, true);
           break;
-        case 'N':
-          actualTCType = TCTYPE_N;
+        }
+        case SerialCommunication::SERIAL_CMD_HEAT_STOP:
+        {
+          /*********************************
+          *            STOP HEAT           *
+          * *******************************/
+          /* Stop heating.
+          * Format:
+          * ^c|[commandID]@
+          * where    ^            is SERIAL_CMD_START
+          *          c            is SERIAL_CMD_HEAT_STOP
+          *          |            is SERIAL_CMD_SEPARATOR
+          *          [commandID]  is the ID of this command
+          *          @            is SERIAL_CMD_END
+          */
+          sandwich.stopHeat(true);
+          communicator.sendCommandResponse(communicator.getFragmentInt(1), SerialCommunication::SERIAL_CMD_HEAT_STOP, true);
           break;
-        case 'R':
-          actualTCType = TCTYPE_R;
+        }
+        case SerialCommunication::SERIAL_CMD_BLINK:
+        {
+          /*********************************
+          *             BLINK              *
+          * *******************************/
+          /* Blinks the flasher LED. Useful for visual identification of the sandwich.
+          * Format:
+          * ^l|[commandID]@
+          * where    ^            is SERIAL_CMD_START
+          *          l            is SERIAL_CMD_BLINK
+          *          |            is SERIAL_CMD_SEPARATOR
+          *          [commandID]  is the ID of this command
+          *          @            is SERIAL_CMD_END
+          */
+          sandwich.blinkFlasher();
+          communicator.sendCommandResponse(communicator.getFragmentInt(1), SerialCommunication::SERIAL_CMD_BLINK, true);
           break;
-        case 'S':
-          actualTCType = TCTYPE_S;
+        }
+        case SerialCommunication::SERIAL_CMD_SHUTDOWN:
+        {
+          /*********************************
+          *            SHUTDOWN            *
+          * *******************************/
+          /* Stop all operations of the sandwich
+          * Format:
+          * ^x@
+          * where    ^            is SERIAL_CMD_START
+          *          x            is SERIAL_CMD_SHUTDOWN
+          *          @            is SERIAL_CMD_END
+          */
+          sandwich.shutdown();
           break;
-        case 'T':
+        }
         default:
-          actualTCType = TCTYPE_T;
-          break;
-        // Not allowing direct voltage measurement
-        }
-
-        switch (incomingSampleAveraging)
         {
-        case 2:
-          actualSampleAveraging = AVERAGE_2;
-          break;
-        case 4:
-          actualSampleAveraging = AVERAGE_4;
-          break;
-        case 8:
-          actualSampleAveraging = AVERAGE_8;
-          break;
-        case 16:
-          actualSampleAveraging = AVERAGE_16;
-          break;
-        case 1:
-        default:
-          actualSampleAveraging = AVERAGE_1;
+          // Unrecognized command; send error
+          communicator.sendCommandError(SerialCommunication::SERIAL_SEND_CORRUPTCMD_UNKNOWNCMD);
           break;
         }
-
-        // Measure sample T depending on given command
-        if (commandType == SerialCommunication::SERIAL_CMD_DAQ_START_SAMPLE)
-        {
-          sandwich.startDAQ(actualTCType, actualSampleAveraging, true);
-          communicator.sendCommandResponse(SerialCommunication::SERIAL_CMD_DAQ_START_SAMPLE, true);
-        }
-        else
-        {
-          sandwich.startDAQ(actualTCType, actualSampleAveraging, false);
-          communicator.sendCommandResponse(SerialCommunication::SERIAL_CMD_DAQ_START_HEATER, true);
-        }
-        break;
-      }
-      case SerialCommunication::SERIAL_CMD_DAQ_STOP:
-      {
-        /*********************************
-        *            STOP DAQ            *
-        * *******************************/
-        /* Stop data acquisition of temperature.
-        * Format:
-        * ^s@
-        * where    ^    is SERIAL_CMD_START
-        *          s    is SERIAL_CMD_DAQ_STOP
-        *          @    is SERIAL_CMD_END
-        */
-        sandwich.stopDAQ();
-        communicator.sendCommandResponse(SerialCommunication::SERIAL_CMD_DAQ_STOP, true);
-        break;
-      }
-      case SerialCommunication::SERIAL_CMD_HEAT_START:
-      {
-        /*********************************
-        *          START HEAT            *
-        * *******************************/
-        /* Begin the heating process.
-        * Format:
-        * ^h|s|r|d|kp|ki@
-        * where    ^    is SERIAL_CMD_START
-        *          h    is SERIAL_CMD_HEAT_START
-        *          |    is SERIAL_CMD_SEPARATOR
-        *          s    is the temperature setpoint, in °C
-        *          r    is the heating rate, in °C/min
-        *          d    is the heating duration, in seconds (to be converted into ms before going into startHeat() function)
-        *          kp   is the proportional constant for PI algorithm
-        *          ki   is the integral constant for PI algorithm
-        *          @    is SERIAL_CMD_END
-        */
-        sandwich.startHeat(communicator.getFragmentDouble(1), communicator.getFragmentDouble(2), communicator.getFragmentULong(3) * 1000, communicator.getFragmentDouble(4), communicator.getFragmentDouble(5));
-        communicator.sendCommandResponse(SerialCommunication::SERIAL_CMD_HEAT_START, true);
-        break;
-      }
-      case SerialCommunication::SERIAL_CMD_HEAT_STOP:
-      {
-        /*********************************
-        *            STOP HEAT           *
-        * *******************************/
-        /* Stop heating.
-        * Format:
-        * ^c@
-        * where    ^    is SERIAL_CMD_START
-        *          c    is SERIAL_CMD_HEAT_STOP
-        *          @    is SERIAL_CMD_END
-        */
-        sandwich.stopHeat(true);
-        communicator.sendCommandResponse(SerialCommunication::SERIAL_CMD_HEAT_STOP, true);
-        break;
-      }
-      case SerialCommunication::SERIAL_CMD_BLINK:
-      {
-        /*********************************
-        *             BLINK              *
-        * *******************************/
-        /* Blinks the flasher LED. Useful for visual identification of the sandwich.
-        * Format:
-        * ^l@
-        * where    ^    is SERIAL_CMD_START
-        *          l    is SERIAL_CMD_BLINK
-        *          @    is SERIAL_CMD_END
-        */
-        sandwich.blinkFlasher();
-        communicator.sendCommandResponse(SerialCommunication::SERIAL_CMD_BLINK, true);
-        break;
-      }
-      default:
-      {
-        // Unrecognized command; send error
-        communicator.sendCommandError(SerialCommunication::SERIAL_SEND_CORRUPTCMD_UNKNOWNCMD);
-        break;
-      }
       }
     }
   }
