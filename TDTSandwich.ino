@@ -1,103 +1,90 @@
+/**********************************************************************
+
+Copyright (C) 2019 Soon Kiat Lau
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+***********************************************************************/
 
 #include <SerialCommunication.h>
 #include <MAX31856.h>
 #include <PID_modified.h>
 #include "TDTSandwich.h"
 #include <stdlib.h> // For atof function
-/* Arduino Uno program for communicating with C# program in computer to control TDT sandwiches.
- * 
- * 
- *  Commands from computer:
- *  
- *  Start DAQ for heater only:          g{0}                  where 'g' means 'go'. Replace {0} with thermocouple type from this list [ B E J K N R S T ]
- *  Start DAQ for heater and sample:    b{0}                  where 'b' means 'both'. Replace {0} with thermocouple type from this list [ B E J K N R S T ]
- *  Get sandwich ID:                    w                     where 'w' means 'who?'.
- *  Blink LED:                          l                     where 'l' means 'LED'.
- *  Stop DAQ:                           s                     where 's' means 'stop'
- *  Start heating:                      h{0}{1}{2}{3}{4}{5}   where 'h' means 'heat'. Replace {0} with setpoint desired in the format xxx.x                                                                         (include leading and trailing zeroes)
- *                                                                                    Replace {1} with heating rate in the format xxx.xx                                                                            (include leading and trailing zeroes)
- *                                                                                    Replace {2} with the duration for each temperature step in the format xx.xx                                                   (include leading and trailing zeroes)
- *                                                                                    Replace {3} with PID proportional constant desired in the format xxxx.xx                                                      (include leading and trailing zeroes)
- *                                                                                    Replace {4} with PID integration constant desired in the format xxxx.xx                                                       (include leading and trailing zeroes)
- *                                                                                    **REMOVE THIS** Replace {5} with duration (ms) for the heating for countdown timer. Leave as 0 if no countdown desired. Format is xxxxxxxxxx  (include leading and trailing zeroes)
- *  Stop heating:                       c                     where 'c' means 'cool'
- *  Change setpoint:                    t{0}                  where 't' means 'temperature'. Replace {0} with setpoint desired in the format xxx.xx    (include leading and trailing zeroes)
- *  
- *  
- *  
- *  The pin for SS must be left empty. From SPI.cpp:
- *  // Warning: if the SS pin ever becomes a LOW INPUT then SPI
- *  // automatically switches to Slave, so the data direction of
- *  // the SS pin MUST be kept as OUTPUT.
- *  
- *  
- *  
- *  created 2018
- *  by Soon Kiat Lau
- */
-
-
-// Sandwich ID
-// THIS MUST BE DIFFERENT FOR EVERY SANDWICH. This allows the C# identify the ports the sandwich are connected to. Must be more than 0 and less than 100
-const uint8_t sandwichID = 1;
 
 // Number of heaters
-const uint8_t heaterCount = 2;
+const uint8_t HEATER_COUNT = 2;
 
 // Pins
-const uint8_t heatLEDPin      = 7;
-const uint8_t flasherPin      = A0;
-const uint8_t buzzerPin       = A1;
-const uint8_t heaterSSRPin[heaterCount]   = { 9, 8 };
-const uint8_t heaterCSPin[heaterCount]    = { 4, 5 };
-const uint8_t heaterDRDYPin[heaterCount]  = { A3, A5 };
-const uint8_t heaterFaultPin[heaterCount] = { A2, A4 };
-const uint8_t sampleCSPin     = 6;
-const uint8_t sampleDRDYPin   = 3;
-const uint8_t sampleFaultPin  = 2;
+const uint8_t PIN_EXP_LATCH     = 7;
+const uint8_t PIN_EXP_OE        = 8;
+const uint8_t PIN_SEG_LATCH     = 9;
+const uint8_t PIN_HEATER_SSR[HEATER_COUNT]    = { 6, 5 };
+const uint8_t PIN_HEATER_CS[HEATER_COUNT]     = { 2, 3 };
+const uint8_t PIN_HEATER_DRDY[HEATER_COUNT]   = { A1, A3 };
+const uint8_t PIN_HEATER_FAULT[HEATER_COUNT]  = { A0, A2 };
+const uint8_t PIN_SAMPLE_CS     = 4;
+const uint8_t PIN_SAMPLE_DRDY   = A5;
+const uint8_t PIN_SAMPLE_FAULT  = A4;
 
 // Min and max temperatures for the system. This is for safety - the heaters will be shut-off if the readings violate the min/max temperatures
 // All numbers are in °C
 // Note the cold-junction temperature are integers because the registers for these temperatures are 8-bit
-const double minHeaterTemperature = 1;
-const double maxHeaterTemperature = 200;
-const double minSampleTemperature = 1;
-const double maxSampleTemperature = 200;
-const int8_t minCJTemperature = 10;
-const int8_t maxCJTemperature = 40;
+const double HEATER_TEMP_MIN  = -100;
+const double HEATER_TEMP_MAX  = 200;
+const double SAMPLE_TEMP_MIN  = -100;
+const double SAMPLE_TEMP_MAX  = 200;
+const int8_t CJ_TEMP_MIN      = -10;
+const int8_t CJ_TEMP_MAX      = 80;
 
 // Serial communication
 const unsigned long baudRate = 9600;
 
 SerialCommunication communicator = SerialCommunication();
 TDTSandwich sandwich = TDTSandwich( communicator,
-                                    heatLEDPin,
-                                    flasherPin,
-                                    buzzerPin,
-                                    heaterSSRPin,
-                                    heaterCSPin,
-                                    heaterDRDYPin,
-                                    heaterFaultPin,
-                                    sampleCSPin,
-                                    sampleDRDYPin,
-                                    sampleFaultPin,
-                                    minHeaterTemperature,
-                                    maxHeaterTemperature,
-                                    minSampleTemperature,
-                                    maxSampleTemperature,
-                                    minCJTemperature,
-                                    maxCJTemperature);
+                                    PIN_HEATER_SSR,
+                                    PIN_HEATER_CS,
+                                    PIN_HEATER_DRDY,
+                                    PIN_HEATER_FAULT,
+                                    PIN_EXP_LATCH,
+                                    PIN_EXP_OE,
+                                    PIN_SEG_LATCH,
+                                    PIN_SAMPLE_CS,
+                                    PIN_SAMPLE_DRDY,
+                                    PIN_SAMPLE_FAULT,
+                                    HEATER_TEMP_MIN,
+                                    HEATER_TEMP_MAX,
+                                    SAMPLE_TEMP_MIN,
+                                    SAMPLE_TEMP_MAX,
+                                    CJ_TEMP_MIN,
+                                    CJ_TEMP_MAX);
 
 
 void setup() {
+  // Use hardware SPI (supposedly faster than software SPI). The pins of the amplifier
+  // should be connected as follows (    Notation: (amplifier pin) -> (Arduino Uno pin) [(Arduino Uno pin number)]    )
+  // CS ->  any   [Can be any digital output pin. The hardware SPI requires that pin 10 (SS) is left untouched. If the SS pin ever becomes a LOW INPUT then SPI automatically switches to Slave, so the data direction of the SS pin MUST be kept as OUTPUT.]
+  // SDI -> MOSI  [pin 11]
+  // SDO -> MISO  [pin 12]
+  // SCK -> SCK   [pin 13]
+  SPI.begin();
+  
   sandwich.init();
   communicator.init(baudRate);
 }
 
 void loop()
 {
-  // TODO: Connection check
-
   sandwich.run();
 }
 
@@ -132,7 +119,7 @@ void serialEvent() {
           *          w    is SERIAL_CMD_CONNECTION
           *          @    is SERIAL_CMD_END
           */
-          communicator.sendSandwichID(sandwichID);
+          communicator.sendSandwichID(sandwich.id);
           break;
         }
         case SerialCommunication::SERIAL_CMD_DAQ_START_HEATER:

@@ -1,29 +1,13 @@
-/**********************************************************************
-Copyright 2018 Soon Kiat Lau
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-http ://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-***********************************************************************/
-
 #include "TDTSandwich.h"
 
 TDTSandwich::TDTSandwich( SerialCommunication& communicator,
-                          const uint8_t& heatLEDPin,
-                          const uint8_t& flasherPin,
-                          const uint8_t& buzzerPin,
                           const uint8_t heaterSSRPin[],
                           const uint8_t heaterCSPin[],
                           const uint8_t heaterDRDYPin[],
                           const uint8_t heaterFaultPin[],
+                          const uint8_t& expLatchPin,
+                          const uint8_t& expOEPin,
+                          const uint8_t& addLatchPin,
                           const uint8_t& sampleCSPin,
                           const uint8_t& sampleDRDYPin,
                           const uint8_t& sampleFaultPin,
@@ -35,9 +19,9 @@ TDTSandwich::TDTSandwich( SerialCommunication& communicator,
                           const int8_t& maxCJTemperature)
                           :
                           communicator_(communicator),
-                          heatLEDPin_(heatLEDPin),
-                          flasherPin_(flasherPin),
-                          buzzerPin_(buzzerPin),
+                          expLatchPin_(expLatchPin),
+                          expOEPin_(expOEPin),
+                          addLatchPin_(addLatchPin),
                           minHeaterTemperature_(minHeaterTemperature),
                           maxHeaterTemperature_(maxHeaterTemperature),
                           minSampleTemperature_(minSampleTemperature),
@@ -46,16 +30,13 @@ TDTSandwich::TDTSandwich( SerialCommunication& communicator,
                           maxCJTemperature_(maxCJTemperature)
 {
 
-  // Initialize pins for non-heater
-  pinMode(heatLEDPin_, OUTPUT);
-  pinMode(flasherPin_, OUTPUT);
-  pinMode(buzzerPin_, OUTPUT);
+  // Initialize pins
+  // Don't initialize OE pin for the expansion shift register yet; do that only in init function
+  pinMode(expLatchPin, OUTPUT);
   pinMode(sampleCSPin, OUTPUT);
+  pinMode(addLatchPin, OUTPUT);
   pinMode(sampleDRDYPin, INPUT);
   pinMode(sampleFaultPin, INPUT);
-  deactivateHeatLED_();
-  deactivateFlasher_();
-  deactivateBuzzer_();
 
   // Initialize heaters
   for (uint8_t h = 0; h < heaterCount_; h++)
@@ -69,7 +50,7 @@ TDTSandwich::TDTSandwich( SerialCommunication& communicator,
     // Use dummy numbers for Kp and Ki; these will be set when startHeat command is sent.
     // On the other hand, Kd should always be 0 since we want to use a PI control.
     heaterPID_[h] = PID(&heaterTemperature_[h], &heaterControlOutput_[h], &heaterTempSetpoint_[h], 1, 1, 0, millis(), P_ON_M, DIRECT);
-    heaterPID_[h].SetOutputLimits(-PIDLimit_, PIDLimit_);
+    heaterPID_[h].SetOutputLimits(PIDLowerLimit_, PIDUpperLimit_);
   }
 
   // Sample thermocouple amplifier. Notice we don't set limits for thermocouple temperature here
@@ -90,13 +71,14 @@ TDTSandwich::~TDTSandwich()
 
 void TDTSandwich::init()
 {
-  // Use hardware SPI (supposedly faster than software SPI). The pins of the amplifier
-  // should be connected as follows (    Notation: (amplifier pin) -> (Arduino Uno pin) [(Arduino Uno pin number)]    )
-  // CS ->  any   [Can be any digital output pin. The hardware SPI requires that pin 10 (SS) is left untouched. If the SS pin ever becomes a LOW INPUT then SPI automatically switches to Slave, so the data direction of the SS pin MUST be kept as OUTPUT.]
-  // SDI -> MOSI  [pin 11]
-  // SDO -> MISO  [pin 12]
-  // SCK -> SCK   [pin 13]
-  SPI.begin();
+  // Initialize the expansion shift register, with LOW on all outputs
+  expShiftRegState = 0; // LOW on all outputs
+  activateAddOE_(); // Disable output of address shift register for now.
+  digitalWrite(expOEPin_, LOW); // Enable outputs
+  pinMode(expOEPin_, OUTPUT);
+
+  // Get sandwich ID and display it
+  refreshID();
 
   // Initialize heater thermocouple amplifier
   for (uint8_t h = 0; h < heaterCount_; h++)
@@ -131,11 +113,12 @@ void TDTSandwich::run()
       {
         handleCountDown_();
       }
+    }
 
-      if (countdownFinishing_)
-      {
-        signalHeatEnd_();
-      }
+    // This is placed outside of check for heatActive_ because signalHeatEnd_() itself stops heat, and still needs to be called after heatActive_ is set to false.
+    if (countdownFinishing_)
+    {
+      signalHeatEnd_();
     }
   }
 
@@ -224,9 +207,11 @@ void TDTSandwich::startHeat(double setpoint, double heatingRate, unsigned long h
       heaterSetpoint_ = setpoint;
       heaterTempSetpoint_[h] = heaterTemperature_[h];
 
-      // Set up PID
-      // Leave Kd as 0 since we are using a PI control.
-      heaterPID_[h].SetTunings(Kp, Ki, 0);
+      // Set up and calculate parameters for PID
+      reachedTargetThreshold_ = false;
+      KpGiven_                = Kp;
+      KiGiven_                = Ki;
+      calcAndSetPIDTunings();
       heaterPID_[h].Reset();
       heaterPID_[h].setLastTime(curTime);
 
@@ -305,6 +290,39 @@ void TDTSandwich::blinkFlasher()
     // Initialize status flag
     blinkPeriodComplete_ = true;
   }
+}
+
+// Get sandwich ID and display it
+void TDTSandwich::refreshID()
+{
+  // Prepare to grab the sandwich ID
+  activateTransceiverOE_(); // Put the 3.3 V -> 5 V transceiver to high impedance output so that its 5 V MISO output doesn't disturb the MISO output of the address shift register
+  activateAddLatch_();  // Latch input data
+  deactivateAddLatch_();
+  deactivateAddOE_();
+
+  // SH/LD was previously low. Pull high to transfer latched data into storage register and prepare for serial shifting.
+  // THIS MUST BE DONE just before shifting data out of the register, so that the data in the storage register is not
+  // accidentally shifted out by calls to other functions that uses the SPI line.
+  activateAddSHLD_();
+
+  // Grab the sandwich ID
+  SPI.beginTransaction(HC589A_spisettings);
+  id = SPI.transfer(0);  // Send dummy data. We only need the response from the address shift register.
+  SPI.endTransaction();
+  deactivateAddSHLD_();
+  activateAddOE_(); // Change output to high impedance
+  deactivateTransceiverOE_(); // Re-enable the transceiver outputs
+
+  // Display the sandwich ID on the 7-segment displays
+  uint8_t digit1 = id / 10;
+  uint8_t digit2 = id % 10;
+  SPI.beginTransaction(HC595_spisettings);
+  SPI.transfer(getSegmentDisplayCode(SEG2_MASKS, digit2));
+  SPI.transfer(getSegmentDisplayCode(SEG1_MASKS, digit1));
+  SPI.endTransaction();
+  activateSegLatch_();
+  deactivateSegLatch_();
 }
 
 // Stop all sandwich operations
@@ -485,11 +503,16 @@ void TDTSandwich::handleHeating_()
       {// Only perform PID updates if we have new temperature readings
         unsigned long curTime = millis();
         heaterTFreshReading[h] = false;
+        calcAndSetPIDTunings();
         heaterPID_[h].Compute(curTime);
-        // Serial.print("Output: ");
-        // Serial.println(heaterControlOutput_[h]);
+        /*
+        Serial.print("Output ");
+        Serial.print(h);
+        Serial.print(": ");
+        Serial.println(heaterControlOutput_[h]);
+         */
         if (heaterControlOutput_[h] > HEATER_ON_MIN)
-        {// Outside of minimum output treshold; The treshold exists so that if the on time is extremely small,
+        {// Outside of minimum output threshold; The threshold exists so that if the on time is extremely small,
           // the heater can just be left off 100% instead of turning on for short time between each PID cycle.
 
           // Calculate the appropriate time for turning on/off the heater
@@ -503,7 +526,7 @@ void TDTSandwich::handleHeating_()
           // the duration between the previous temperature reading and the current one.
           unsigned long PIDPeriod = curTime - heaterPrevPIDPeriodStartTime_[h];
           heatOnTime_[h] = curTime;
-          heatOnDuration_[h] = constrain(heaterControlOutput_[h], HEATER_ON_MIN, PIDLimit_) / PIDLimit_ * PIDPeriod;
+          heatOnDuration_[h] = constrain(heaterControlOutput_[h], HEATER_ON_MIN, PIDDutyUpperLimit_) / PIDDutyUpperLimit_ * PIDPeriod;
           heaterOn_[h] = true;
 
           // Check if the off duration is above the minimum threshold to prevent dead time between subsequent near-100% dutycycles.
@@ -543,6 +566,42 @@ void TDTSandwich::handleHeating_()
       deactivateHeater_(h);
       heaterOn_[h] = false;
     }
+  }
+}
+
+// Calculate the PID tunings (specifically, just the Kp) based on current temperature readings
+// and update the PID class with the new values.
+// NOTE: The function assumes that we are HEATING i.e. heater setpoint is higher than heater T readings.
+// If the heater setpoint is set lower than the heater T reading, then we are simply stuck at Zone 3.
+void TDTSandwich::calcAndSetPIDTunings()
+{
+  for (uint8_t h = 0; h < heaterCount_; h++)
+  {
+    if (!reachedTargetThreshold_ && heaterTemperature_[h] >= heaterSetpoint_ - KP_MAINTAIN_TRESHOLD_SIZE)
+    {
+      reachedTargetThreshold_ = true;
+    }
+    
+    if (reachedTargetThreshold_)
+    {
+      Kp_ = KP_MAINTAIN;
+    }
+    else
+    {
+      Kp_ = KpGiven_;
+    }
+
+    if (heaterTemperature_[h] >= heaterSetpoint_ - KI_MAINTAIN_TRESHOLD_SIZE)
+    {
+      Ki_ = KI_MAINTAIN;
+    }
+    else
+    {
+      Ki_ = KiGiven_;
+    }
+    
+    // Leave Kd as 0 since we are using a PI control.
+    heaterPID_[h].SetTunings(Kp_, Ki_/1000, 0);
   }
 }
 
@@ -631,14 +690,102 @@ void TDTSandwich::handleBlinking_()
   }
 }
 
+uint8_t TDTSandwich::getSegmentDisplayCode(const uint8_t segmentDisplayMasks[7], uint8_t displayedNumber)
+{
+  uint8_t displayCode = 0;
+  switch (displayedNumber)
+  {
+  case 0:
+    // Activate all segments except G 
+    displayCode = 255;
+    displayCode &= ~segmentDisplayMasks[6];
+    break;
+  case 1:
+    // Activate segments B and C
+    displayCode |= segmentDisplayMasks[1];
+    displayCode |= segmentDisplayMasks[2];
+    break;
+  case 2:
+    // Activate segments A, B, G, E and D
+    displayCode |= segmentDisplayMasks[0];
+    displayCode |= segmentDisplayMasks[1];
+    displayCode |= segmentDisplayMasks[6];
+    displayCode |= segmentDisplayMasks[4];
+    displayCode |= segmentDisplayMasks[3];
+    break;
+  case 3:
+    // Activate segments A, B, G, C and D
+    displayCode |= segmentDisplayMasks[0];
+    displayCode |= segmentDisplayMasks[1];
+    displayCode |= segmentDisplayMasks[6];
+    displayCode |= segmentDisplayMasks[2];
+    displayCode |= segmentDisplayMasks[3];
+    break;
+  case 4:
+    // Activate segments F, G, B and C
+    displayCode |= segmentDisplayMasks[5];
+    displayCode |= segmentDisplayMasks[6];
+    displayCode |= segmentDisplayMasks[1];
+    displayCode |= segmentDisplayMasks[2];
+    break;
+  case 5:
+    // Activate segments A, F, G, C and D
+    displayCode |= segmentDisplayMasks[0];
+    displayCode |= segmentDisplayMasks[5];
+    displayCode |= segmentDisplayMasks[6];
+    displayCode |= segmentDisplayMasks[2];
+    displayCode |= segmentDisplayMasks[3];
+    break;
+  case 6:
+    // Activate all segments except B
+    displayCode = 255;
+    displayCode &= ~segmentDisplayMasks[1];
+    break;
+  case 7:
+    // Activate segments A, B and C
+    displayCode |= segmentDisplayMasks[0];
+    displayCode |= segmentDisplayMasks[1];
+    displayCode |= segmentDisplayMasks[2];
+    break;
+  case 8:
+    // Activate all segments 
+    displayCode = 255;
+    break;
+  case 9:
+    // Activate all segments except E 
+    displayCode = 255;
+    displayCode &= ~segmentDisplayMasks[4];
+    break;
+  default:
+    // Don't display anything at all
+    displayCode = 0;
+    break;
+  }
+
+  return displayCode;
+}
+
+void TDTSandwich::SPITransferExp(uint8_t byte)
+{
+  SPI.beginTransaction(HC595_spisettings);
+  SPI.transfer(byte);
+  SPI.endTransaction();
+
+  // Transfer storage register to output
+  digitalWrite(expLatchPin_, HIGH);
+  digitalWrite(expLatchPin_, LOW);
+}
+
 void TDTSandwich::activateHeatLED_()
 {
-  digitalWrite(heatLEDPin_, HIGH);
+  expShiftRegState |= EXP_MASK_HEATLED;
+  SPITransferExp(expShiftRegState);
 }
 
 void TDTSandwich::deactivateHeatLED_()
 {
-  digitalWrite(heatLEDPin_, LOW);
+  expShiftRegState &= ~EXP_MASK_HEATLED;
+  SPITransferExp(expShiftRegState);
 }
 
 void TDTSandwich::activateHeater_(uint8_t heaterIndex)
@@ -653,23 +800,86 @@ void TDTSandwich::deactivateHeater_(uint8_t heaterIndex)
 
 void TDTSandwich::activateFlasher_()
 {
-  digitalWrite(flasherPin_, HIGH);
+  expShiftRegState |= EXP_MASK_FLASHER;
+  SPITransferExp(expShiftRegState);
 }
 
 void TDTSandwich::deactivateFlasher_()
 {
-  digitalWrite(flasherPin_, LOW);
+  expShiftRegState &= ~EXP_MASK_FLASHER;
+  SPITransferExp(expShiftRegState);
 }
 
 void TDTSandwich::activateBuzzer_()
 {
-  digitalWrite(buzzerPin_, HIGH);
+  expShiftRegState |= EXP_MASK_BUZZER;
+  SPITransferExp(expShiftRegState);
 }
 
 void TDTSandwich::deactivateBuzzer_()
 {
-  digitalWrite(buzzerPin_, LOW);
+  expShiftRegState &= ~EXP_MASK_BUZZER;
+  SPITransferExp(expShiftRegState);
 }
+
+void TDTSandwich::activateSegLatch_()
+{
+  digitalWrite(addLatchPin_, HIGH);
+}
+
+void TDTSandwich::deactivateSegLatch_()
+{
+  digitalWrite(addLatchPin_, LOW);
+}
+
+void TDTSandwich::activateAddOE_()
+{
+  expShiftRegState |= EXP_MASK_ADD_OE;
+  SPITransferExp(expShiftRegState);
+}
+
+void TDTSandwich::deactivateAddOE_()
+{
+  expShiftRegState &= ~EXP_MASK_ADD_OE;
+  SPITransferExp(expShiftRegState);
+}
+
+void TDTSandwich::activateAddLatch_()
+{
+  expShiftRegState |= EXP_MASK_ADD_LATCH;
+  SPITransferExp(expShiftRegState);
+}
+
+void TDTSandwich::deactivateAddLatch_()
+{
+  expShiftRegState &= ~EXP_MASK_ADD_LATCH;
+  SPITransferExp(expShiftRegState);
+}
+
+void TDTSandwich::activateAddSHLD_()
+{
+  expShiftRegState |= EXP_MASK_ADD_SHLD;
+  SPITransferExp(expShiftRegState);
+}
+
+void TDTSandwich::deactivateAddSHLD_()
+{
+  expShiftRegState &= ~EXP_MASK_ADD_SHLD;
+  SPITransferExp(expShiftRegState);
+}
+
+void TDTSandwich::activateTransceiverOE_()
+{
+  expShiftRegState |= EXP_MASK_TCVR_OE;
+  SPITransferExp(expShiftRegState);
+}
+
+void TDTSandwich::deactivateTransceiverOE_()
+{
+  expShiftRegState &= ~EXP_MASK_TCVR_OE;
+  SPITransferExp(expShiftRegState);
+}
+
 
 
 void TDTSandwich::handleTCAmplifierFault(MAX31856* TCAmplifier, bool heaterTCAmplifier, uint8_t index)
