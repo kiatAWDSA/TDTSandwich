@@ -16,9 +16,9 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 ***********************************************************************/
 
+#include <SerialCommunication.h>
 #include <PID_modified.h>
 #include <MAX31856.h>
-#include <SerialCommunication.h>
 
 typedef enum
 {
@@ -148,8 +148,13 @@ private:
   bool flasherBlinking_;
 
   // Heater thermocouple and heater
+  const double minHeaterTemperature_;
+  const double maxHeaterTemperature_;
+  const int8_t minCJTemperature_; // Shared with sample TC
+  const int8_t maxCJTemperature_; // Shared with sample TC
+  bool haltSendingT_; // Shared with sample TC
   bool heaterTCOK_[heaterCount_];
-  bool heaterTReadySend_[heaterCount_];
+  bool heaterTAcquired_[heaterCount_];
   bool heaterTFreshReading[heaterCount_];
   bool heaterOn_[heaterCount_];
   bool heatOffMinSatisfied[heaterCount_];
@@ -162,10 +167,6 @@ private:
   unsigned long heatOnDuration_[heaterCount_];
   unsigned long heaterPrevPIDPeriodStartTime_[heaterCount_];
   unsigned long heatEndTime_;
-  const double minHeaterTemperature_;
-  const double maxHeaterTemperature_;
-  const int8_t minCJTemperature_; // Shared with sample TC
-  const int8_t maxCJTemperature_; // Shared with sample TC
 
   // Heating rate and setpoint adjustment
   const unsigned long setpointAdjustmentInterval_ = 500;          // Adjust the setpoint every 500 ms
@@ -193,7 +194,7 @@ private:
 
   // Sample thermocouple
   bool sampleTCOK_;
-  bool sampleTReadySend_;
+  bool sampleTAcquired_;
   double sampleTemperature_;
 
   // Flasher

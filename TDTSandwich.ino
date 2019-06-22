@@ -114,7 +114,7 @@ void serialEvent() {
           * *******************************/
           /* Computer checking for connection to Arduino. This doesn't have command IDs.
           * Format:
-          * ^c@
+          * ^w@
           * where    ^    is SERIAL_CMD_START
           *          w    is SERIAL_CMD_CONNECTION
           *          @    is SERIAL_CMD_END
