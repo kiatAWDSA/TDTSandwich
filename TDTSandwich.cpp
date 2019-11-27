@@ -140,11 +140,12 @@ void TDTSandwich::startDAQ(MAX31856_TCType TCType, MAX31856_SampleAveraging aver
 
     // Initialize status flags
     heaterTCOK_[h] = true;
-    heaterTReadySend_[h] = false;
+    heaterTAcquired_[h] = false;
     heaterTFreshReading[h] = false;
   }
 
   DAQHeaterActive_ = true;
+  haltSendingT_ = false;
 
   // Do the same for sample thermocouples, if needed
   if (measureSample)
@@ -152,7 +153,7 @@ void TDTSandwich::startDAQ(MAX31856_TCType TCType, MAX31856_SampleAveraging aver
     sampleTCAmplifier_->setThermocoupleTypeAndOversampling(TCType, averageSampleCount);
     sampleTCAmplifier_->startAutoConversion();
     sampleTCOK_ = true;
-    sampleTReadySend_ = false;
+    sampleTAcquired_ = false;
     DAQSampleActive_ = true;
   }
 }
@@ -330,11 +331,7 @@ void TDTSandwich::shutdown()
 {
   if (DAQHeaterActive_ || DAQSampleActive_)
   {
-    if (heatActive_)
-    {
-      stopHeat(true);
-    }
-
+    // Heat is stopped by calling stopDAQ too.
     stopDAQ();
   }
 }
@@ -343,10 +340,11 @@ void TDTSandwich::shutdown()
 // provided that they are available and have no faults.
 void TDTSandwich::getTemperatureReading_()
 {
+  // Acquire heater thermocouple readings
   for (uint8_t h = 0; h < heaterCount_; h++)
   {
-    if (!heaterTReadySend_[h])
-    {// Need to get the heater temperature reading; otherwise just chill.
+    if (!heaterTAcquired_[h])
+    {// Need to get the heater temperature reading.
       if (heaterTCAmplifier_[h]->isFaultless())
       {// The heater thermocouple amplifier did not detect any errors
         heaterTCOK_[h] = true;
@@ -354,7 +352,7 @@ void TDTSandwich::getTemperatureReading_()
         if (heaterTCAmplifier_[h]->dataIsReady())
         {// There is new temperature data available
           heaterTemperature_[h] = heaterTCAmplifier_[h]->readTCTemperature();
-          heaterTReadySend_[h] = true;
+          heaterTAcquired_[h] = true;
           heaterTFreshReading[h] = true;
 
           // Trigger open-circuit detection for the next conversion
@@ -371,20 +369,21 @@ void TDTSandwich::getTemperatureReading_()
         // The high/low thresholds do trigger the FAULT pin.
         if (heaterTCOK_[h])
         {// Only take action if this is the first time fault was encountered.
-          // Otherwise, do nothing, at least until the fault is cleared, in which case would trigger
+          // Otherwise, do nothing until the fault is cleared which would trigger
           // the previous code block
           heaterTCOK_[h] = false;
-          heaterTReadySend_[h] = false;
+          heaterTAcquired_[h] = false;
           handleTCAmplifierFault(heaterTCAmplifier_[h], true, h);
         }
       }
     }
   }
   
+  // Acquire sample thermocouple readings
   if (DAQSampleActive_)
   {// Only check for sample thermocouple readings if we are measuring sample temperature
-    if (!sampleTReadySend_)
-    {// Need to get a sample temperature reading; otherwise just chill.
+    if (!sampleTAcquired_)
+    {// Need to get the sample temperature reading.
       if (sampleTCAmplifier_->isFaultless())
       {// The sample thermocouple amplifier did not detect any errors
         sampleTCOK_ = true;
@@ -392,7 +391,7 @@ void TDTSandwich::getTemperatureReading_()
         if (sampleTCAmplifier_->dataIsReady())
         {// There is new temperature data available
           sampleTemperature_ = sampleTCAmplifier_->readTCTemperature();
-          sampleTReadySend_ = true;
+          sampleTAcquired_ = true;
 
           // Trigger open-circuit detection for the next conversion
           sampleTCAmplifier_->checkOpenCircuit(MODE_1);
@@ -406,39 +405,74 @@ void TDTSandwich::getTemperatureReading_()
           // Otherwise, do nothing, at least until the fault is cleared, in which case would trigger
           // the previous code block
           sampleTCOK_ = false;
-          sampleTReadySend_ = false;
+          sampleTAcquired_ = false;
           handleTCAmplifierFault(sampleTCAmplifier_, false, 0);
         }
       }
     }
 
-    // Only send data to computer if ALL thermocouples obey one of the following rules:
+    // Send readings to computer once all readings/errors have been collected before preparing for next acquisition cycle.
+    // Only send data to computer if ALL (including sample, if it is active) thermocouples obey one of the following rules:
     // a) TReadySend_ AND TCOK    : new temperature reading available, and the TC amplifier is OK
-    // b) !TReadySend_ AND !TCOK  : there was an error with the TC amplifier
-    // c) TReadySend_ AND !TCOK   : this case will never occur due to the logic of the code
-    if (!((!heaterTReadySend_[0] && heaterTCOK_[0]) || (!heaterTReadySend_[1] && heaterTCOK_[1]) || (!sampleTReadySend_ && sampleTCOK_)))
+    // b) !TReadySend_ AND !TCOK  : there was an error with the TC amplifier.
+    // Sending all data in one stream instead of separately saves some work, though the time of the measurements as received by the computer will be
+    // slightly different than the actual time at which each measurement was taken.
+    if (    ((heaterTAcquired_[0] && heaterTCOK_[0])  ||  (!heaterTAcquired_[0] && !heaterTCOK_[0]))
+        &&  ((heaterTAcquired_[1] && heaterTCOK_[1])  ||  (!heaterTAcquired_[1] && !heaterTCOK_[1]))
+        &&  ((sampleTAcquired_    && sampleTCOK_)     ||  (!sampleTAcquired_    && !sampleTCOK_)))
     {// Send temperature reading/error notice to computer
-      communicator_.sendHeaterSampleTemperature(heaterTCOK_[0], heaterTemperature_[0], heaterTCOK_[1], heaterTemperature_[1], sampleTCOK_, sampleTemperature_);
+
+      if (haltSendingT_ && (heaterTCOK_[0] || heaterTCOK_[1] || sampleTCOK_))
+      {// We previously halted sending data because all three thermocouples had error, but are resuming now because at least one thermocouple has recovered.
+        haltSendingT_ = false;
+      }
+      
+      if (!haltSendingT_)
+      {// Only send data if it hasn't be halted due to all thermocouples having errors.
+        communicator_.sendHeaterSampleTemperature(heaterTCOK_[0], heaterTemperature_[0], heaterTCOK_[1], heaterTemperature_[1], sampleTCOK_, sampleTemperature_);
+      }
+
+      if (!heaterTCOK_[0] && !heaterTCOK_[1] && !sampleTCOK_)
+      {// If all thermocouples have error, stop sending data lines packed with errors. Sending will resume based on the checks previous to this.
+        haltSendingT_ = true;
+      }
 
       // Prepare for new readings
-      heaterTReadySend_[0] = false;
-      heaterTReadySend_[1] = false;
-      sampleTReadySend_ = false;
+      heaterTAcquired_[0] = false;
+      heaterTAcquired_[1] = false;
+      sampleTAcquired_ = false;
     }
   }
   else
   {// Not reading temperature of sample; send only heater T readings.
-    // Only send data to computer if the HEATER thermocouples obey one of the following rules:
-    // a) TReadySend_ AND TCOK    : new temperature reading available, and the TC amplifier is OK
-    // b) !TReadySend_ AND !TCOK  : there was an error with the TC amplifier
-    // c) TReadySend_ AND !TCOK   : this case will never occur due to the logic of the code
-    if (!((!heaterTReadySend_[0] && heaterTCOK_[0]) || (!heaterTReadySend_[1] && heaterTCOK_[1])))
+   // Send readings to computer once all readings/errors have been collected before preparing for next acquisition cycle.
+   // Only send data to computer if ALL (including sample, if it is active) thermocouples obey one of the following rules:
+   // a) TReadySend_ AND TCOK    : new temperature reading available, and the TC amplifier is OK
+   // b) !TReadySend_ AND !TCOK  : there was an error with the TC amplifier.
+   // Sending all data in one stream instead of separately saves some work, though the time of the measurements as received by the computer will be
+   // slightly different than the actual time at which each measurement was taken.
+    if (    ((heaterTAcquired_[0] && heaterTCOK_[0]) || (!heaterTAcquired_[0] && !heaterTCOK_[0]))
+        &&  ((heaterTAcquired_[1] && heaterTCOK_[1]) || (!heaterTAcquired_[1] && !heaterTCOK_[1])))
     {// Send temperature reading/error notice to computer
-      communicator_.sendHeaterTemperature(heaterTCOK_[0], heaterTemperature_[0], heaterTCOK_[1], heaterTemperature_[1]);
+
+      if (haltSendingT_ && (heaterTCOK_[0] || heaterTCOK_[1]))
+      {// We previously halted sending data because all three thermocouples had error, but are resuming now because at least one thermocouple has recovered.
+        haltSendingT_ = false;
+      }
+
+      if (!haltSendingT_)
+      {// Only send data if it hasn't be halted due to all thermocouples having errors.
+        communicator_.sendHeaterTemperature(heaterTCOK_[0], heaterTemperature_[0], heaterTCOK_[1], heaterTemperature_[1]);
+      }
+
+      if (!heaterTCOK_[0] && !heaterTCOK_[1])
+      {// If all thermocouples have error, stop sending data lines packed with errors. Sending will resume based on the checks previous to this.
+        haltSendingT_ = true;
+      }
 
       // Prepare for new readings
-      heaterTReadySend_[0] = false;
-      heaterTReadySend_[1] = false;
+      heaterTAcquired_[0] = false;
+      heaterTAcquired_[1] = false;
     }
   }
 }
