@@ -38,7 +38,7 @@ const uint8_t PIN_SAMPLE_DRDY   = A5;
 const uint8_t PIN_SAMPLE_FAULT  = A4;
 
 // Min and max temperatures for the system. This is for safety - the heaters will be shut-off if the readings violate the min/max temperatures
-// All numbers are in °C
+// All numbers are in °C.
 // Note the cold-junction temperature are integers because the registers for these temperatures are 8-bit
 const double HEATER_TEMP_MIN  = -100;
 const double HEATER_TEMP_MAX  = 200;
