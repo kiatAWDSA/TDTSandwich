@@ -1,5 +1,5 @@
 # TDTSandwich
-An open source system for heating samples with dry heat at adjustable heating rates. This page contains the Arduino code that should be uploaded to the Arduino Nano used in each TDT Sandwich. The full repository containing bill of materials and links to other components of the system can be found at https://osf.io/5q3y7/.
+The TDT Sandwich is an open source system for heating samples with dry heat at adjustable heating rates. This page contains the Arduino code that should be uploaded to the Arduino Nano used in each TDT Sandwich. The full repository containing bill of materials and links to other components of the system can be found at https://osf.io/5q3y7/.
 
 ## Installation
 **NOTE**: Before proceeding, make sure you have read the build instructions at https://dx.doi.org/10.17504/protocols.io.36agrae and decide if you want to proceed with "Quick & easy" (compiled hex file) or the "Advanced method" (Arduino library).
