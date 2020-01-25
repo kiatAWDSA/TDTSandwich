@@ -16,9 +16,9 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 ***********************************************************************/
 
-#include <SerialCommunication.h>
-#include <MAX31856.h>
-#include <PID_modified.h>
+#include "SerialCommunication.h"
+#include "MAX31856.h"
+#include "PID_modified.h"
 #include "TDTSandwich.h"
 #include <stdlib.h> // For atof function
 
