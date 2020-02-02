@@ -54,6 +54,7 @@ public:
 
   // Sandwich id
   uint8_t id;
+  static const uint8_t ID_MAX = 99; // Capped to 99 because the 7-segment display only has 2 digits, though the pins actually allow up to 255
 
   // Commands given to the sandwich
   void startDAQ(MAX31856_TCType TCType, MAX31856_SampleAveraging averageSampleCount, bool measureSample);

@@ -310,6 +310,10 @@ void TDTSandwich::refreshID()
   // Grab the sandwich ID
   SPI.beginTransaction(HC589A_spisettings);
   id = SPI.transfer(0);  // Send dummy data. We only need the response from the address shift register.
+  if (id > ID_MAX)
+  {// Limit the ID to prevent weird display on the 7-segment display
+    id = ID_MAX;
+  }
   SPI.endTransaction();
   deactivateAddSHLD_();
   activateAddOE_(); // Change output to high impedance
