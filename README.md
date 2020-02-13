@@ -7,4 +7,4 @@ The TDT Sandwich is an open source system for heating samples with dry heat at a
  - **Advanced**: Click the green "Clone or download button" on this webpage (it's at the top right of the big list of files) and click "Download ZIP." Extract the files somewhere on your computer. If you have the Arduino IDE installed, open "TDTSandwich.ino" and upload the program to your Arduino Nano. Tutorial for Arduino IDE: https://www.arduino.cc/en/Guide/HomePage
 
 
-If you are looking for the computer program for controlling the TDT Sandwiches, please visit https://github.com/kiatAWDSA/TDTSandwich_computer/.
+If you are looking for the computer program for controlling the TDT Sandwiches, please visit https://osf.io/edpku/.
